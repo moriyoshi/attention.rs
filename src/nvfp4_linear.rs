@@ -488,6 +488,10 @@ fn nvfp4_matmul_impl(
             // zero-initialized storage for FlashInfer, F16, and software paths.
             let native_bf16_uninitialized = use_hardware_fp4
                 && dtype == DType::BF16
+                // The SM120 tile scheduler can leave the final partial N tile
+                // untouched (for example N=160); the zeroed path supplies its
+                // established value there. Require complete 128-column tiles.
+                && n % 128 == 0
                 && std::env::var("XINFER_NVFP4_SKIP_OUTPUT_ZERO").as_deref() == Ok("1");
             let output = if native_bf16_uninitialized {
                 unsafe { Tensor::empty_((m, n), dtype, dev)? }
