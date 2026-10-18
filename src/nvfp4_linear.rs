@@ -754,20 +754,27 @@ fn nvfp4_matmul_impl(
                                         ws_bytes,
                                         stream,
                                     ),
-                                    DType::BF16 => ffi::nvfp4_cutlass_gemm_bf16(
-                                        act_packed_ptr as *const std::ffi::c_void,
-                                        weight_ptr,
-                                        act_scales_sw_ptr as *const std::ffi::c_void,
-                                        wscale_sw_ptr as *const std::ffi::c_void,
-                                        alpha_ptr,
-                                        output_ptr,
-                                        m as i32,
-                                        n as i32,
-                                        k as i32,
-                                        ws_ptr,
-                                        ws_bytes,
-                                        stream,
-                                    ),
+                                    DType::BF16 => {
+                                        let status = ffi::nvfp4_cutlass_gemm_bf16_checked(
+                                            act_packed_ptr as *const std::ffi::c_void,
+                                            weight_ptr,
+                                            act_scales_sw_ptr as *const std::ffi::c_void,
+                                            wscale_sw_ptr as *const std::ffi::c_void,
+                                            alpha_ptr,
+                                            output_ptr,
+                                            m as i32,
+                                            n as i32,
+                                            k as i32,
+                                            ws_ptr,
+                                            ws_bytes,
+                                            stream,
+                                        );
+                                        if status != 0 {
+                                            candle_core::bail!(
+                                                "nvfp4 CUTLASS BF16 GEMM rejected M={m} N={n} K={k}"
+                                            );
+                                        }
+                                    }
                                     _ => candle_core::bail!(
                                         "nvfp4_matmul: unsupported dtype {:?}",
                                         dtype
@@ -1017,6 +1024,28 @@ fn nvfp4_matmul_impl(
 #[cfg(test)]
 mod resident_scale_tests {
     use super::*;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn checked_bf16_gemm_rejects_empty_problem_before_dereferencing() {
+        let status = unsafe {
+            kernels::ffi::nvfp4_cutlass_gemm_bf16_checked(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+                32,
+                32,
+                std::ptr::null_mut(),
+                0,
+                0,
+            )
+        };
+        assert_ne!(status, 0);
+    }
 
     #[test]
     fn rejects_malformed_device_scale_envelopes() -> Result<()> {

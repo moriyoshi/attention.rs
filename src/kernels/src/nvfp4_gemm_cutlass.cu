@@ -324,7 +324,7 @@ struct CutlassFp4GemmSm120 {
 #if defined(ENABLE_FP4_SM100)
 
 template <typename Config>
-static void run_fp4_gemm(
+static bool run_fp4_gemm(
     void* D, const void* A, const void* B,
     const void* input_sf, const void* weight_sf,
     const float* global_sf,
@@ -383,7 +383,7 @@ static void run_fp4_gemm(
   if (workspace_size > workspace_bytes) {
     fprintf(stderr, "[NVFP4 SM100] workspace too small: need %zu, have %zu (M=%d N=%d K=%d)\n",
             workspace_size, workspace_bytes, m, n, k);
-    return;
+    return false;
   }
   void* ws = (workspace_size > 0) ? workspace : nullptr;
 
@@ -391,25 +391,27 @@ static void run_fp4_gemm(
   if (can_impl != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM100] can_implement failed: %s (M=%d N=%d K=%d)\n",
             cutlass::cutlassGetStatusString(can_impl), m, n, k);
-    return;
+    return false;
   }
 
   auto init_status = gemm.initialize(operator_args, ws, stream);
   if (init_status != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM100] initialize failed: %s (M=%d N=%d K=%d)\n",
             cutlass::cutlassGetStatusString(init_status), m, n, k);
-    return;
+    return false;
   }
 
   auto run_status = gemm.run(operator_args, ws, stream, nullptr, /*launch_with_pdl=*/true);
   if (run_status != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM100] run failed: %s (M=%d N=%d K=%d ws=%zu)\n",
             cutlass::cutlassGetStatusString(run_status), m, n, k, workspace_size);
+    return false;
   }
+  return true;
 }
 
 template <typename OutType>
-static void dispatch_fp4_gemm_sm100(
+static bool dispatch_fp4_gemm_sm100(
     void* D, const void* A, const void* B,
     const void* input_sf, const void* weight_sf,
     const float* global_sf,
@@ -418,13 +420,13 @@ static void dispatch_fp4_gemm_sm100(
     cudaStream_t stream)
 {
   if (m <= 128) {
-    run_fp4_gemm<KernelConfigSmallM<OutType>>(
+    return run_fp4_gemm<KernelConfigSmallM<OutType>>(
         D, A, B, input_sf, weight_sf, global_sf, m, n, k, workspace, workspace_bytes, stream);
   } else if (m <= 1024) {
-    run_fp4_gemm<KernelConfigMediumM<OutType>>(
+    return run_fp4_gemm<KernelConfigMediumM<OutType>>(
         D, A, B, input_sf, weight_sf, global_sf, m, n, k, workspace, workspace_bytes, stream);
   } else {
-    run_fp4_gemm<KernelConfigLargeM<OutType>>(
+    return run_fp4_gemm<KernelConfigLargeM<OutType>>(
         D, A, B, input_sf, weight_sf, global_sf, m, n, k, workspace, workspace_bytes, stream);
   }
 }
@@ -434,7 +436,7 @@ static void dispatch_fp4_gemm_sm100(
 #if defined(ENABLE_FP4_SM120)
 
 template <typename GemmAdapter, typename Config>
-static void run_fp4_gemm_sm120_impl(
+static bool run_fp4_gemm_sm120_impl(
     void* D, const void* A, const void* B,
     const void* input_sf, const void* weight_sf,
     const float* global_sf,
@@ -492,7 +494,7 @@ static void run_fp4_gemm_sm120_impl(
   if (workspace_size > workspace_bytes) {
     fprintf(stderr, "[NVFP4 SM120 %s] workspace too small: need %zu, have %zu (M=%d N=%d K=%d)\n",
             sched_name, workspace_size, workspace_bytes, m, n, k);
-    return;
+    return false;
   }
   void* ws = (workspace_size > 0) ? workspace : nullptr;
 
@@ -500,21 +502,23 @@ static void run_fp4_gemm_sm120_impl(
   if (can_impl != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM120 %s] can_implement failed: %s (M=%d N=%d K=%d)\n",
             sched_name, cutlass::cutlassGetStatusString(can_impl), m, n, k);
-    return;
+    return false;
   }
 
   auto init_status = gemm.initialize(operator_args, ws, stream);
   if (init_status != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM120 %s] initialize failed: %s (M=%d N=%d K=%d)\n",
             sched_name, cutlass::cutlassGetStatusString(init_status), m, n, k);
-    return;
+    return false;
   }
 
   auto run_status = gemm.run(operator_args, ws, stream, nullptr, /*launch_with_pdl=*/true);
   if (run_status != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM120 %s] run failed: %s (M=%d N=%d K=%d ws=%zu)\n",
             sched_name, cutlass::cutlassGetStatusString(run_status), m, n, k, workspace_size);
+    return false;
   }
+  return true;
 }
 
 // Try a specific tile config with DP scheduler, return true on success
@@ -541,10 +545,9 @@ static bool try_fp4_gemm_sm120_dp(
     return false;
   }
 
-  run_fp4_gemm_sm120_impl<GemmDP, Config>(
+  return run_fp4_gemm_sm120_impl<GemmDP, Config>(
       D, A, B, input_sf, weight_sf, global_sf, m, n, k,
       workspace, workspace_bytes, stream, tile_name);
-  return true;
 }
 
 // Try a specific tile config with StreamK scheduler, return true on success
@@ -571,14 +574,13 @@ static bool try_fp4_gemm_sm120_streamk(
     return false;
   }
 
-  run_fp4_gemm_sm120_impl<GemmSK, Config>(
+  return run_fp4_gemm_sm120_impl<GemmSK, Config>(
       D, A, B, input_sf, weight_sf, global_sf, m, n, k,
       workspace, workspace_bytes, stream, tile_name);
-  return true;
 }
 
 template <typename OutType>
-static void run_fp4_gemm_sm120(
+static bool run_fp4_gemm_sm120(
     void* D, const void* A, const void* B,
     const void* input_sf, const void* weight_sf,
     const float* global_sf,
@@ -597,47 +599,48 @@ static void run_fp4_gemm_sm120(
     if (try_fp4_gemm_sm120_streamk<Cfg_128x128x128>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x128-SK"))
-      return;
+      return true;
     // Fallback: try 128x128x256 with StreamK (better for large K)
     if (try_fp4_gemm_sm120_streamk<Cfg_128x128x256>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x256-SK"))
-      return;
+      return true;
   } else if (m >= 256) {
     // Large M: prefer 256x128x128 DP
     if (try_fp4_gemm_sm120_dp<Cfg_256x128x128>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "256x128x128-DP"))
-      return;
+      return true;
     // Fallback: 128x128x256 DP (better for large K)
     if (try_fp4_gemm_sm120_dp<Cfg_128x128x256>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x256-DP"))
-      return;
+      return true;
     // Last resort: 128x128x128 DP
     if (try_fp4_gemm_sm120_dp<Cfg_128x128x128>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x128-DP"))
-      return;
+      return true;
   } else {
     // Medium M (128..255): try 128x128x256 DP first (good K throughput)
     if (try_fp4_gemm_sm120_dp<Cfg_128x128x256>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x256-DP"))
-      return;
+      return true;
     // Fallback: 128x128x128 DP
     if (try_fp4_gemm_sm120_dp<Cfg_128x128x128>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x128-DP"))
-      return;
+      return true;
     // StreamK fallback
     if (try_fp4_gemm_sm120_streamk<Cfg_128x128x128>(
             D, A, B, input_sf, weight_sf, global_sf, m, n, k,
             workspace, workspace_bytes, stream, "128x128x128-SK"))
-      return;
+      return true;
   }
 
   fprintf(stderr, "[NVFP4 SM120] no viable tile config for M=%d N=%d K=%d\n", m, n, k);
+  return false;
 }
 
 #endif // ENABLE_FP4_SM120
@@ -671,7 +674,9 @@ void nvfp4_cutlass_gemm_f16(
 #endif
 }
 
-void nvfp4_cutlass_gemm_bf16(
+// Returns 0 only when CUTLASS accepted and launched a full D write. This is
+// required when the caller allocates D without first clearing its storage.
+int nvfp4_cutlass_gemm_bf16_checked(
     const void* input,
     const void* weight,
     const void* input_sf,
@@ -682,16 +687,33 @@ void nvfp4_cutlass_gemm_bf16(
     void* workspace, int64_t workspace_bytes,
     int64_t stream)
 {
+  if (M <= 0 || N <= 0 || K <= 0 || N % 32 != 0 || K % 32 != 0 || workspace_bytes < 0) {
+    return 1;
+  }
   auto s = reinterpret_cast<cudaStream_t>(stream);
 #if defined(ENABLE_FP4_SM120)
-  run_fp4_gemm_sm120<cutlass::bfloat16_t>(
+  return run_fp4_gemm_sm120<cutlass::bfloat16_t>(
       output, input, weight, input_sf, weight_sf, global_sf, M, N, K,
-      workspace, static_cast<size_t>(workspace_bytes), s);
+      workspace, static_cast<size_t>(workspace_bytes), s) ? 0 : 1;
 #elif defined(ENABLE_FP4_SM100)
-  dispatch_fp4_gemm_sm100<cutlass::bfloat16_t>(
+  return dispatch_fp4_gemm_sm100<cutlass::bfloat16_t>(
       output, input, weight, input_sf, weight_sf, global_sf, M, N, K,
-      workspace, static_cast<size_t>(workspace_bytes), s);
+      workspace, static_cast<size_t>(workspace_bytes), s) ? 0 : 1;
+#else
+  return 1;
 #endif
+}
+
+void nvfp4_cutlass_gemm_bf16(
+    const void* input, const void* weight,
+    const void* input_sf, const void* weight_sf,
+    const float* global_sf, void* output,
+    int M, int N, int K,
+    void* workspace, int64_t workspace_bytes, int64_t stream)
+{
+  (void)nvfp4_cutlass_gemm_bf16_checked(
+      input, weight, input_sf, weight_sf, global_sf, output,
+      M, N, K, workspace, workspace_bytes, stream);
 }
 
 }  // extern "C"
@@ -712,6 +734,14 @@ void nvfp4_cutlass_gemm_bf16(
     const float*, void*, int, int, int,
     void*, int64_t, int64_t)
 {
+}
+
+int nvfp4_cutlass_gemm_bf16_checked(
+    const void*, const void*, const void*, const void*,
+    const float*, void*, int, int, int,
+    void*, int64_t, int64_t)
+{
+  return 1;
 }
 
 }  // extern "C"

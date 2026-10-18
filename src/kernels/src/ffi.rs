@@ -1974,6 +1974,21 @@ extern "C" {
         stream: i64,
     );
 
+    pub fn nvfp4_cutlass_gemm_bf16_checked(
+        input: *const c_void,
+        weight: *const c_void,
+        input_sf: *const c_void,
+        weight_sf: *const c_void,
+        global_sf: *const f32,
+        output: *mut c_void,
+        M: i32,
+        N: i32,
+        K: i32,
+        workspace: *mut c_void,
+        workspace_bytes: i64,
+        stream: i64,
+    ) -> i32;
+
     // FlashInfer-style CUTLASS NVFP4 GEMM (SM100+, flashinfer feature)
     pub fn flashinfer_nvfp4_cutlass_gemm_f16(
         input: *const c_void,
