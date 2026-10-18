@@ -482,18 +482,7 @@ fn nvfp4_matmul_impl(
                 && n % 32 == 0
                 && k % 32 == 0;
 
-            // CUTLASS's native BF16 epilogue has ElementC=void and writes the
-            // complete logical MxN output. Its checked launch reports any
-            // synchronous rejection before the tensor can be returned. Keep
-            // zero-initialized storage for FlashInfer, F16, and software paths.
-            let native_bf16_uninitialized = use_hardware_fp4
-                && dtype == DType::BF16
-                && std::env::var("XINFER_NVFP4_SKIP_OUTPUT_ZERO").as_deref() == Ok("1");
-            let output = if native_bf16_uninitialized {
-                unsafe { Tensor::empty_((m, n), dtype, dev)? }
-            } else {
-                Tensor::zeros((m, n), dtype, dev)?
-            };
+            let output = Tensor::zeros((m, n), dtype, dev)?;
             let has_bias = bias.is_some();
 
             if use_flashinfer_fp4 || use_hardware_fp4 {
