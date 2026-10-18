@@ -674,8 +674,8 @@ void nvfp4_cutlass_gemm_f16(
 #endif
 }
 
-// Returns 0 only when CUTLASS accepted and launched a full D write. This is
-// required when the caller allocates D without first clearing its storage.
+// Returns 0 when CUTLASS accepted the launch. This does not establish that
+// every logical D element was written; callers must still initialize output.
 int nvfp4_cutlass_gemm_bf16_checked(
     const void* input,
     const void* weight,
