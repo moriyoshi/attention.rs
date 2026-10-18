@@ -219,7 +219,7 @@ __device__ __forceinline__ uint8_t float_to_fp4_e2m1(float val) {
 
 static constexpr int NVFP4_QUANT_MAX_THREADS = 512;
 
-template <typename InType>
+template <typename InType, bool GatedGelu = false>
 __global__ void nvfp4_quantize_activation_hw_kernel(
     const InType* __restrict__ input,   // [M, K]
     uint8_t* __restrict__ output,       // [M, K/2] packed FP4
@@ -234,7 +234,7 @@ __global__ void nvfp4_quantize_activation_hw_kernel(
 
   if (row >= M) return;
 
-  int64_t in_base = static_cast<int64_t>(row) * K;
+  int64_t in_base = static_cast<int64_t>(row) * (GatedGelu ? 2 * K : K);
 
   for (int block_idx = threadIdx.x; block_idx < num_blocks; block_idx += blockDim.x) {
 
@@ -244,7 +244,17 @@ __global__ void nvfp4_quantize_activation_hw_kernel(
   for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
     int k_idx = k_start + i;
     if (k_idx < K) {
-      vals[i] = static_cast<float>(input[in_base + k_idx]);
+      if constexpr (GatedGelu) {
+        const float gate = static_cast<float>(input[in_base + k_idx]);
+        const float up = static_cast<float>(input[in_base + K + k_idx]);
+        const float gelu = 0.5f * gate *
+            (1.0f + tanhf(0.7978845608f *
+                           (gate + 0.044715f * gate * gate * gate)));
+        const float rounded_gelu = __bfloat162float(__float2bfloat16_rn(gelu));
+        vals[i] = __bfloat162float(__float2bfloat16_rn(rounded_gelu * up));
+      } else {
+        vals[i] = static_cast<float>(input[in_base + k_idx]);
+      }
     } else {
       vals[i] = 0.0f;
     }
@@ -466,6 +476,35 @@ void nvfp4_quantize_activation_bf16(
       static_cast<uint8_t*>(swizzled_scales),
       M, num_blocks_k,
       M_padded, K_scale_padded);
+}
+
+void nvfp4_quantize_gated_gelu_activation_bf16(
+    const void* gate_up,
+    void* output,
+    void* scales,
+    void* swizzled_scales,
+    const float* input_scale_inv,
+    int M, int K,
+    int M_padded, int K_scale_padded,
+    int64_t stream)
+{
+  int num_blocks_k = K / NVFP4_BLOCK_SIZE;
+  dim3 grid(M);
+  dim3 block(min(num_blocks_k, NVFP4_QUANT_MAX_THREADS));
+  nvfp4_quantize_activation_hw_kernel<nv_bfloat16, true>
+      <<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+          static_cast<const nv_bfloat16*>(gate_up),
+          static_cast<uint8_t*>(output),
+          static_cast<uint8_t*>(scales),
+          input_scale_inv, M, K, M_padded);
+
+  int total_swizzled = M_padded * K_scale_padded;
+  int threads = 256;
+  int blocks = (total_swizzled + threads - 1) / threads;
+  nvfp4_swizzle_scales_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      static_cast<const uint8_t*>(scales),
+      static_cast<uint8_t*>(swizzled_scales),
+      M, num_blocks_k, M_padded, K_scale_padded);
 }
 
 // Swizzle weight scales from linear to CUTLASS 128x4 layout
@@ -964,6 +1003,9 @@ void nvfp4_quantize_activation_f16(
     const void*, void*, void*, void*, const float*, int, int, int, int, int64_t) {}
 
 void nvfp4_quantize_activation_bf16(
+    const void*, void*, void*, void*, const float*, int, int, int, int, int64_t) {}
+
+void nvfp4_quantize_gated_gelu_activation_bf16(
     const void*, void*, void*, void*, const float*, int, int, int, int, int64_t) {}
 
 void nvfp4_quantize_activation_grouped_f16(

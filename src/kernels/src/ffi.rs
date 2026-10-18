@@ -1797,6 +1797,19 @@ extern "C" {
         stream: i64,
     );
 
+    pub fn nvfp4_quantize_gated_gelu_activation_bf16(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        swizzled_scales: *mut c_void,
+        input_scale_inv: *const f32,
+        M: i32,
+        K: i32,
+        M_padded: i32,
+        K_scale_padded: i32,
+        stream: i64,
+    );
+
     // FlashInfer invokeFP4Quantization (SM120/SM121; writes packed FP4 + SWIZZLED_128x4 SF)
     pub fn flashinfer_nvfp4_quantize_activation_f16(
         input: *const c_void,

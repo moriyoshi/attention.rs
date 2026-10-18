@@ -287,6 +287,108 @@ pub fn nvfp4_matmul(
     weight_scale_swizzled: Option<&Tensor>,
     weight_row_scales: Option<&Tensor>,
 ) -> Result<Tensor> {
+    nvfp4_matmul_with_device_scales(
+        input,
+        weight,
+        scale,
+        weight_global_scale,
+        input_scale,
+        bias,
+        is_prefill,
+        weight_scale_swizzled,
+        weight_row_scales,
+        None,
+    )
+}
+
+/// Like [`nvfp4_matmul`], with optional model-owned calibrated hardware
+/// scales `[alpha, input_scale_inv]` on the same CUDA device as `input`.
+/// The tensor must remain alive through CUDA graph replay. Online activation
+/// scaling takes precedence when enabled, and software paths ignore it.
+#[allow(clippy::too_many_arguments)]
+pub fn nvfp4_matmul_with_device_scales(
+    input: &Tensor,
+    weight: &Tensor,
+    scale: &Tensor,
+    weight_global_scale: f32,
+    input_scale: f32,
+    bias: Option<&Tensor>,
+    is_prefill: bool,
+    weight_scale_swizzled: Option<&Tensor>,
+    weight_row_scales: Option<&Tensor>,
+    device_scales: Option<&Tensor>,
+) -> Result<Tensor> {
+    nvfp4_matmul_impl(
+        input,
+        weight,
+        scale,
+        weight_global_scale,
+        input_scale,
+        bias,
+        is_prefill,
+        weight_scale_swizzled,
+        weight_row_scales,
+        device_scales,
+        false,
+    )
+}
+
+/// Apply BF16 gated GELU to `[gate, up]` and quantize the rounded BF16 result
+/// for the hardware NVFP4 GEMM without materializing an intermediate tensor.
+/// This is supported only on the CUTLASS hardware FP4 path.
+#[allow(clippy::too_many_arguments)]
+pub fn nvfp4_gated_gelu_matmul_with_device_scales(
+    gate_up: &Tensor,
+    weight: &Tensor,
+    scale: &Tensor,
+    weight_global_scale: f32,
+    input_scale: f32,
+    bias: Option<&Tensor>,
+    is_prefill: bool,
+    weight_scale_swizzled: Option<&Tensor>,
+    weight_row_scales: Option<&Tensor>,
+    device_scales: Option<&Tensor>,
+) -> Result<Tensor> {
+    nvfp4_matmul_impl(
+        gate_up,
+        weight,
+        scale,
+        weight_global_scale,
+        input_scale,
+        bias,
+        is_prefill,
+        weight_scale_swizzled,
+        weight_row_scales,
+        device_scales,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nvfp4_matmul_impl(
+    input: &Tensor,
+    weight: &Tensor,
+    scale: &Tensor,
+    weight_global_scale: f32,
+    input_scale: f32,
+    bias: Option<&Tensor>,
+    is_prefill: bool,
+    weight_scale_swizzled: Option<&Tensor>,
+    weight_row_scales: Option<&Tensor>,
+    device_scales: Option<&Tensor>,
+    gated_gelu: bool,
+) -> Result<Tensor> {
+    if let Some(scales) = device_scales {
+        if scales.dtype() != candle_core::DType::F32
+            || scales.dims() != [2]
+            || !scales.is_contiguous()
+            || !scales.device().same_device(input.device())
+        {
+            candle_core::bail!(
+                "nvfp4_matmul: device scales require contiguous F32 [2] on input device"
+            );
+        }
+    }
     let input = if input.is_contiguous() {
         input.clone()
     } else {
@@ -311,7 +413,14 @@ pub fn nvfp4_matmul(
     }
 
     let m = input_dims[0];
-    let k = input_dims[1];
+    if gated_gelu && (input_dims[1] % 2 != 0 || input.dtype() != candle_core::DType::BF16) {
+        candle_core::bail!("nvfp4 gated GELU requires BF16 [M, 2*K] input");
+    }
+    let k = if gated_gelu {
+        input_dims[1] / 2
+    } else {
+        input_dims[1]
+    };
     let n = weight_dims[0];
 
     if k % NVFP4_BLOCK_SIZE != 0 {
@@ -328,6 +437,13 @@ pub fn nvfp4_matmul(
 
     let dev = input.device();
     let dtype = input.dtype();
+
+    if gated_gelu && !dev.is_cuda() {
+        candle_core::bail!("nvfp4 gated GELU requires CUDA");
+    }
+    if gated_gelu && crate::nvfp4_online_scale() {
+        candle_core::bail!("nvfp4 gated GELU requires checkpoint-calibrated input scaling");
+    }
 
     match dev {
         #[cfg(feature = "cuda")]
@@ -350,7 +466,8 @@ pub fn nvfp4_matmul(
             // Hardware W4A4 for prefill; decode too unless XINFER_NVFP4_HW_DECODE=0.
             let sm = crate::cuda_utils::sm_version(cuda_dev).unwrap_or(0);
             let use_hw_gemm = is_prefill || crate::nvfp4_hw_decode();
-            let use_flashinfer_fp4 = use_hw_gemm
+            let use_flashinfer_fp4 = !gated_gelu
+                && use_hw_gemm
                 && cfg!(feature = "flashinfer")
                 && is_flashinfer_fp4_available(dev)
                 && n % 32 == 0
@@ -441,6 +558,11 @@ pub fn nvfp4_matmul(
                         }
                         drop(input_s);
                         (scratch.alpha as *const f32, scratch.sf_scale as *const f32)
+                    } else if let Some(device_scales) = device_scales {
+                        let (storage, layout) = device_scales.storage_and_layout();
+                        let ptr = cuda_ptr(&storage, DType::F32)?
+                            + (layout.start_offset() * DType::F32.size_in_bytes()) as u64;
+                        (ptr as *const f32, (ptr + 4) as *const f32)
                     } else {
                         use candle_core::cuda_backend::cudarc::driver::result;
                         let (hw_input_scale, hw_input_scale_inv) = if input_scale > 1e-12 {
@@ -518,6 +640,19 @@ pub fn nvfp4_matmul(
                                         dtype
                                     ),
                                 }
+                            } else if gated_gelu {
+                                ffi::nvfp4_quantize_gated_gelu_activation_bf16(
+                                    input_ptr,
+                                    act_packed_ptr,
+                                    act_scales_ptr,
+                                    act_scales_sw_ptr,
+                                    sf_scale_ptr,
+                                    m as i32,
+                                    k as i32,
+                                    m_padded as i32,
+                                    k_scale_padded as i32,
+                                    stream,
+                                );
                             } else {
                                 match dtype {
                                     DType::F16 => ffi::nvfp4_quantize_activation_f16(
@@ -652,6 +787,9 @@ pub fn nvfp4_matmul(
                     candle_core::bail!("nvfp4 hardware path requires the cutlass feature");
                 }
             } else {
+                if gated_gelu {
+                    candle_core::bail!("nvfp4 gated GELU requires hardware FP4 GEMM");
+                }
                 // Software dequant path (existing kernels)
                 let (input_s, _) = input.storage_and_layout();
                 let (weight_s, _) = weight.storage_and_layout();
@@ -873,6 +1011,38 @@ pub fn nvfp4_matmul(
             Ok(output)
         }
         _ => candle_core::bail!("nvfp4_matmul: unsupported backend (need CUDA or Metal)"),
+    }
+}
+
+#[cfg(test)]
+mod resident_scale_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_malformed_device_scale_envelopes() -> Result<()> {
+        let dev = candle_core::Device::Cpu;
+        let input = Tensor::zeros((1, 16), candle_core::DType::F16, &dev)?;
+        let weight = Tensor::zeros((1, 8), candle_core::DType::U8, &dev)?;
+        let scales = Tensor::zeros((1, 1), candle_core::DType::U8, &dev)?;
+        for invalid in [
+            Tensor::zeros((1,), candle_core::DType::F32, &dev)?,
+            Tensor::zeros((2,), candle_core::DType::F16, &dev)?,
+        ] {
+            let result = nvfp4_matmul_with_device_scales(
+                &input,
+                &weight,
+                &scales,
+                1.0,
+                1.0,
+                None,
+                true,
+                None,
+                None,
+                Some(&invalid),
+            );
+            assert!(result.is_err());
+        }
+        Ok(())
     }
 }
 
