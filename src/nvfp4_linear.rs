@@ -489,7 +489,10 @@ fn nvfp4_matmul_impl(
             let output = if use_hardware_fp4 && dtype == DType::BF16 {
                 match output_probe.as_deref() {
                     Some("1") => Tensor::ones((m, n), dtype, dev)?,
-                    Some("2") => Tensor::empty_((m, n), dtype, dev)?,
+                    // SAFETY: this branch is restricted to an explicit CUDA
+                    // initcheck probe. The following CUTLASS launch is expected
+                    // to overwrite D; initcheck diagnoses any uncovered word.
+                    Some("2") => unsafe { Tensor::empty_((m, n), dtype, dev)? },
                     _ => Tensor::zeros((m, n), dtype, dev)?,
                 }
             } else {
