@@ -512,7 +512,9 @@ static bool run_fp4_gemm_sm120_impl(
     return false;
   }
 
-  auto run_status = gemm.run(operator_args, ws, stream, nullptr, /*launch_with_pdl=*/true);
+  // The activation quantizer and GEMM share this stream. Do not permit the
+  // GEMM to begin before its quantized A/scales are ready on SM120.
+  auto run_status = gemm.run(operator_args, ws, stream, nullptr, /*launch_with_pdl=*/false);
   if (run_status != cutlass::Status::kSuccess) {
     fprintf(stderr, "[NVFP4 SM120 %s] run failed: %s (M=%d N=%d K=%d ws=%zu)\n",
             sched_name, cutlass::cutlassGetStatusString(run_status), m, n, k, workspace_size);
