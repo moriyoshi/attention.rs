@@ -482,13 +482,16 @@ fn nvfp4_matmul_impl(
                 && n % 32 == 0
                 && k % 32 == 0;
 
-            // Diagnostic only: a different initialized output value reveals
-            // whether the CUTLASS epilogue covers every logical BF16 word.
-            let output = if use_hardware_fp4
-                && dtype == DType::BF16
-                && std::env::var("XINFER_NVFP4_OUTPUT_COVERAGE_PROBE").as_deref() == Ok("1")
-            {
-                Tensor::ones((m, n), dtype, dev)?
+            // Diagnostic only. "1" checks value-independent coverage with a
+            // fully initialized buffer; "2" is for CUDA initcheck runs that
+            // verify the native BF16 epilogue writes every output byte.
+            let output_probe = std::env::var("XINFER_NVFP4_OUTPUT_COVERAGE_PROBE").ok();
+            let output = if use_hardware_fp4 && dtype == DType::BF16 {
+                match output_probe.as_deref() {
+                    Some("1") => Tensor::ones((m, n), dtype, dev)?,
+                    Some("2") => Tensor::empty_((m, n), dtype, dev)?,
+                    _ => Tensor::zeros((m, n), dtype, dev)?,
+                }
             } else {
                 Tensor::zeros((m, n), dtype, dev)?
             };
