@@ -268,8 +268,20 @@ pub fn flash_prefill(
     } else {
         let flash_dtype = flash_half_dtype(query.dtype())?;
 
+        // Opt-in until validated beyond GB10. The existing FFI/default remains
+        // unchanged; FP8, TurboQuant and single-token decode never use this.
+        let launch = if head_dim == 512
+            && std::env::var_os("XINFER_FLASH_512_SWIZZLED").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            && crate::cuda_utils::sm_version(dev).unwrap_or(0) >= 80
+        {
+            kernels::ffi::call_flash_prefill_paged_512_swizzled
+                as unsafe extern "C" fn(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _)
+        } else {
+            kernels::ffi::call_flash_prefill_paged
+        };
         unsafe {
-            kernels::ffi::call_flash_prefill_paged(
+            launch(
                 q_ptr,
                 kc_ptr,
                 vc_ptr,

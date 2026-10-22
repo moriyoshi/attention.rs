@@ -482,6 +482,48 @@ extern "C" void call_flash_prefill_paged(
     }
 }
 
+// Opt-in 512-wide prefill. The query/KV/output layouts and arithmetic are
+// identical to call_flash_prefill_paged; only shared-memory addressing differs.
+extern "C" void call_flash_prefill_paged_512_swizzled(
+    const void* Q, const void* K_cache, const void* V_cache, void* O,
+    const int* block_tables, unsigned int block_table_stride,
+    const unsigned int* cu_seqlens_q, const unsigned int* context_lens,
+    unsigned int num_seqs, unsigned int max_q_len,
+    unsigned int num_q_heads, unsigned int num_kv_heads,
+    unsigned int head_dim, unsigned int cache_block_size,
+    unsigned int sliding_window, unsigned int causal,
+    float inv_sqrt_d, float softcap,
+    int dtype, int64_t stream
+) {
+    if (head_dim != 512) {
+        call_flash_prefill_paged(Q, K_cache, V_cache, O, block_tables,
+            block_table_stride, cu_seqlens_q, context_lens, num_seqs, max_q_len,
+            num_q_heads, num_kv_heads, head_dim, cache_block_size,
+            sliding_window, causal, inv_sqrt_d, softcap, dtype, stream);
+        return;
+    }
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    dim3 grid(num_q_heads, (max_q_len + 31) / 32, num_seqs);
+    constexpr unsigned int smem = 32*512*3*2 + 32*40*2 + 32*2*4;
+#define LAUNCH_SWIZZLED_512(HALF) \
+    cudaFuncSetAttribute(flash_prefill_paged_512<HALF, true>, \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+    flash_prefill_paged_512<HALF, true><<<grid, 256, smem, s>>>( \
+        (const HALF*)Q, (const HALF*)K_cache, (const HALF*)V_cache, (HALF*)O, \
+        block_tables, block_table_stride, cu_seqlens_q, context_lens, \
+        num_q_heads, num_kv_heads, head_dim, cache_block_size, \
+        sliding_window, causal, inv_sqrt_d, softcap)
+    if (dtype == 0) {
+        LAUNCH_SWIZZLED_512(__half);
+    }
+#ifndef NO_BF16_KERNEL
+    else if (dtype == 1) {
+        LAUNCH_SWIZZLED_512(__nv_bfloat16);
+    }
+#endif
+#undef LAUNCH_SWIZZLED_512
+}
+
 extern "C" void call_flash_prefill_paged_fp8(
     const void* Q, const void* K_cache, const void* V_cache, void* O,
     const int* block_tables, unsigned int block_table_stride,

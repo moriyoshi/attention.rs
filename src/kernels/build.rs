@@ -9,16 +9,6 @@ fn unix_path(path: &Path) -> String {
 }
 
 fn main() -> Result<()> {
-    // CUDA translation units use host-side C++ state/workspaces (including
-    // DeepSeek V4's persistent per-device scratch guards).  Consumers that
-    // do not otherwise pull in a C++ dependency, such as the library test
-    // binary, still need the C++ ABI and standard-library symbols.
-    if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-lib=c++");
-    } else {
-        println!("cargo:rustc-link-lib=stdc++");
-    }
-
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CUDACXX");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -366,6 +356,14 @@ fn main() -> Result<()> {
     }
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=cublas");
+
+    // Keep the C++ runtime after the native archives. With --as-needed,
+    // placing it first drops it for consumers that call the FFI directly.
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-lib=c++");
+    } else {
+        println!("cargo:rustc-link-lib=stdc++");
+    }
 
     Ok(())
 }

@@ -479,7 +479,16 @@ flash_prefill_paged(
 #define TILE_CHUNKS_512 (BR_512 * (512 / 8))
 #define NUM_THREADS_512 256
 
-template<typename HalfT>
+// XOR 16-byte chunks within each 128-byte row segment. This is a bijection
+// and retains async-copy alignment without increasing the 101120-byte arena.
+// The false specialization preserves the original address mapping.
+template<bool Swizzled>
+__device__ __forceinline__ unsigned int flash_smem_512_index(
+    unsigned int row, unsigned int col) {
+    return row * 512 + (col ^ (Swizzled ? ((row & 7) * 8) : 0));
+}
+
+template<typename HalfT, bool Swizzled = false>
 __global__ void flash_prefill_paged(
     const HalfT* __restrict__ Q,
     const HalfT* __restrict__ K_cache,
@@ -569,7 +578,7 @@ __global__ void flash_prefill_paged(
         for (unsigned int _i = (t); _i < TILE_CHUNKS_512; _i += (stride)) { \
             unsigned int _row = _i / _cpr, _col = (_i % _cpr) * 8; \
             unsigned int _pos = (kv_s) + _row; \
-            unsigned int _sa = __cvta_generic_to_shared(&(dst)[_row * 512 + _col]); \
+            unsigned int _sa = __cvta_generic_to_shared(&(dst)[flash_smem_512_index<Swizzled>(_row, _col)]); \
             if (_pos < (kv_l)) { \
                 unsigned int _lb = _pos >> _bs_shift; \
                 unsigned int _bo = _pos & _bs_mask; \
@@ -578,7 +587,7 @@ __global__ void flash_prefill_paged(
                     (cache) + (unsigned long long)_pb * _ps + (unsigned long long)_bo * _rs \
                     + (unsigned long long)(kvh) * head_dim + _col); \
                 FLASH_CP_ASYNC(_sa, _gm); \
-            } else { *((uint4*)&(dst)[_row * 512 + _col]) = make_uint4(0,0,0,0); } \
+            } else { *((uint4*)&(dst)[flash_smem_512_index<Swizzled>(_row, _col)]) = make_uint4(0,0,0,0); } \
         } \
     } while(0)
 
@@ -587,12 +596,12 @@ __global__ void flash_prefill_paged(
         const unsigned int cpr = 512 / 8;
         for (unsigned int idx = tid; idx < TILE_CHUNKS_512; idx += NUM_THREADS_512) {
             unsigned int row = idx / cpr, col = (idx % cpr) * 8;
-            unsigned int sa = __cvta_generic_to_shared(&smem_Q[row * 512 + col]);
+            unsigned int sa = __cvta_generic_to_shared(&smem_Q[flash_smem_512_index<Swizzled>(row, col)]);
             if (q_start + row < q_len) {
                 const void* gm = (const void*)&Q[(q_start + row) * q_seq_stride + q_head * head_dim + col];
                 FLASH_CP_ASYNC(sa, gm);
             } else {
-                *((uint4*)&smem_Q[row * 512 + col]) = make_uint4(0, 0, 0, 0);
+                *((uint4*)&smem_Q[flash_smem_512_index<Swizzled>(row, col)]) = make_uint4(0, 0, 0, 0);
             }
         }
         if (kv_block_start < num_kv_blocks) {
@@ -621,16 +630,16 @@ __global__ void flash_prefill_paged(
                 unsigned int kb_u32 = ks * 8;
                 unsigned int ar0 = qk_warp_m + group_id, ar1 = ar0 + 8;
                 unsigned int aq_off = tid_in_group + kb_u32;
-                unsigned int a0 = sQ32[ar0 * 256 + aq_off];
-                unsigned int a1 = sQ32[ar1 * 256 + aq_off];
-                unsigned int a2 = sQ32[ar0 * 256 + aq_off + 4];
-                unsigned int a3 = sQ32[ar1 * 256 + aq_off + 4];
+                unsigned int a0 = sQ32[flash_smem_512_index<Swizzled>(ar0, (aq_off) * 2) / 2];
+                unsigned int a1 = sQ32[flash_smem_512_index<Swizzled>(ar1, (aq_off) * 2) / 2];
+                unsigned int a2 = sQ32[flash_smem_512_index<Swizzled>(ar0, (aq_off + 4) * 2) / 2];
+                unsigned int a3 = sQ32[flash_smem_512_index<Swizzled>(ar1, (aq_off + 4) * 2) / 2];
                 #pragma unroll
                 for (int nt = 0; nt < 4; nt++) {
                     unsigned int nc = nt * 8 + group_id;
                     unsigned int bk_off = tid_in_group + kb_u32;
-                    unsigned int b0 = sK32[nc * 256 + bk_off];
-                    unsigned int b1 = sK32[nc * 256 + bk_off + 4];
+                    unsigned int b0 = sK32[flash_smem_512_index<Swizzled>(nc, (bk_off) * 2) / 2];
+                    unsigned int b1 = sK32[flash_smem_512_index<Swizzled>(nc, (bk_off + 4) * 2) / 2];
                     FLASH_MMA_K16(acc_s[nt][0], acc_s[nt][1], acc_s[nt][2], acc_s[nt][3],
                                   a0, a1, a2, a3, b0, b1,
                                   acc_s[nt][0], acc_s[nt][1], acc_s[nt][2], acc_s[nt][3]);
@@ -760,10 +769,10 @@ __global__ void flash_prefill_paged(
                 for (int nt = 0; nt < N_TILES_PER_WARP_512; nt++) {
                     unsigned int nc = (pv_n_start + nt) * 8 + group_id;
                     unsigned int k0 = ks * 16 + tid_in_group * 2, k1 = k0 + 8;
-                    unsigned int b0 = ((unsigned int)sV[(k0 + 1) * 512 + nc] << 16) |
-                                      (unsigned int)sV[k0 * 512 + nc];
-                    unsigned int b1 = ((unsigned int)sV[(k1 + 1) * 512 + nc] << 16) |
-                                      (unsigned int)sV[k1 * 512 + nc];
+                    unsigned int b0 = ((unsigned int)sV[flash_smem_512_index<Swizzled>(k0 + 1, nc)] << 16) |
+                                      (unsigned int)sV[flash_smem_512_index<Swizzled>(k0, nc)];
+                    unsigned int b1 = ((unsigned int)sV[flash_smem_512_index<Swizzled>(k1 + 1, nc)] << 16) |
+                                      (unsigned int)sV[flash_smem_512_index<Swizzled>(k1, nc)];
                     FLASH_MMA_K16(acc_o[nt][0], acc_o[nt][1], acc_o[nt][2], acc_o[nt][3],
                                   a0, a1, a2, a3, b0, b1,
                                   acc_o[nt][0], acc_o[nt][1], acc_o[nt][2], acc_o[nt][3]);

@@ -3451,6 +3451,30 @@ extern "C" {
     );
 
     #[cfg(feature = "flash")]
+    pub fn call_flash_prefill_paged_512_swizzled(
+        q: *const c_void,
+        k_cache: *const c_void,
+        v_cache: *const c_void,
+        o: *mut c_void,
+        block_tables: *const c_int,
+        block_table_stride: u32,
+        cu_seqlens_q: *const u32,
+        context_lens: *const u32,
+        num_seqs: u32,
+        max_q_len: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+        cache_block_size: u32,
+        sliding_window: u32,
+        causal: u32,
+        inv_sqrt_d: f32,
+        softcap: f32,
+        dtype: i32,
+        stream: i64,
+    );
+
+    #[cfg(feature = "flash")]
     pub fn call_flash_prefill_paged_fp8(
         q: *const c_void,
         k_cache: *const c_void,
