@@ -250,6 +250,11 @@ pub fn swizzle_nvfp4_weight_scales(scale: &Tensor) -> Result<Tensor> {
 
 /// NVFP4 linear: output = input @ weight^T [+ bias]
 ///
+/// Experimental `XINFER_NVFP4_PREFILL_OVERWRITE=1` avoids clearing the native
+/// CUTLASS BF16 output for multi-row prefill on SM120+ explicit CUDA streams.
+/// It changes allocation only; decode, legacy streams and other backends keep
+/// initialized outputs. Set the environment once before inference. Default off.
+///
 /// * `input` - [M, K] in F16/BF16
 /// * `weight` - [N, K/2] packed U8 (2 FP4 E2M1 nibbles per byte)
 /// * `scale` - [N, K/16] U8 FP8 E4M3 block scales (linear layout)
@@ -482,7 +487,26 @@ fn nvfp4_matmul_impl(
                 && n % 32 == 0
                 && k % 32 == 0;
 
-            let output = Tensor::zeros((m, n), dtype, dev)?;
+            // The checked native BF16 GEMM has ElementC=void: its epilogue
+            // writes every logical D element and never reads the old D. Limit
+            // the experiment to explicit-stream SM120+ prefill; all other
+            // backends and decode retain initialized output allocation.
+            let overwrite = is_prefill
+                && m > 1
+                && use_hardware_fp4
+                && dtype == DType::BF16
+                && sm >= 120
+                && !cuda_dev.cu_stream().is_null()
+                && std::env::var("XINFER_NVFP4_PREFILL_OVERWRITE").as_deref() == Ok("1");
+            let output = if overwrite {
+                // SAFETY: only the checked BF16 native branch can consume this
+                // allocation. A rejected GEMM returns Err before output escapes;
+                // a successful launch overwrites the complete m-by-n tensor on
+                // its allocation stream before any subsequent consumer.
+                unsafe { Tensor::empty_((m, n), dtype, dev)? }
+            } else {
+                Tensor::zeros((m, n), dtype, dev)?
+            };
             let has_bias = bias.is_some();
 
             if use_flashinfer_fp4 || use_hardware_fp4 {
